@@ -32,7 +32,6 @@ jobs:
     needs: [test]
     outputs:
       instance_id: ${{ steps.tf_outputs.outputs.instance_id }}
-      alb_dns_name: ${{ steps.tf_outputs.outputs.alb_dns_name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +70,6 @@ jobs:
         working-directory: terraform
         run: |
           echo "instance_id=$(terraform output -raw instance_id)" >> "$GITHUB_OUTPUT"
-          echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> "$GITHUB_OUTPUT"
 
   #  3. Configure (Ansible over SSM) 
   configure:
@@ -157,9 +155,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      - name: Fetch ALB DNS from AWS
+        id: get_alb
+        run: |
+          # Query AWS directly to avoid GitHub Actions secret-masking suppressing
+          # the alb_dns_name job output (which contains the PROJECT_NAME secret).
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName, '${{ secrets.PROJECT_NAME }}')].DNSName | [0]" \
+            --output text)
+          echo "ALB DNS: $ALB_DNS"
+          echo "alb_dns=$ALB_DNS" >> "$GITHUB_OUTPUT"
+
       - name: Wait for ALB to become healthy
         run: |-
-          ALB_DNS="${{ needs.provision.outputs.alb_dns_name }}"
+          ALB_DNS="${{ steps.get_alb.outputs.alb_dns }}"
           echo "Target: http://$ALB_DNS/health"
           for i in $(seq 1 24); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://$ALB_DNS/health" || echo "000")
