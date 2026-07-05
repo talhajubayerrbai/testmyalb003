@@ -82,7 +82,14 @@
       ansible.builtin.command:
         cmd: python3 -m venv "{{ venv_dir }}"
         creates: "{{ venv_dir }}/bin/activate"
-      become_user: "{{ app_user }}"
+
+    - name: Fix venv ownership
+      ansible.builtin.file:
+        path: "{{ venv_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: true
 
     - name: Upgrade pip in venv
       ansible.builtin.pip:
