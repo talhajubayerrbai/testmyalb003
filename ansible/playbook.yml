@@ -64,12 +64,8 @@
         mode: "0644"
 
     - name: Check if public/ directory exists locally
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../public/"
-      register: public_dir
-      delegate_to: localhost
-      connection: local
-      become: false
+      ansible.builtin.set_fact:
+        public_dir_exists: "{{ lookup('fileglob', playbook_dir + '/../public/*') | length > 0 }}"
 
     - name: Synchronise app source - public/ static assets (if present)
       ansible.builtin.copy:
@@ -78,7 +74,7 @@
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
         mode: "0644"
-      when: public_dir.stat.exists
+      when: public_dir_exists | bool
 
     #  Python virtual environment 
 
