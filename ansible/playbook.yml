@@ -1,0 +1,199 @@
+---
+- name: Configure app server
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    app_dir: /opt/app
+    venv_dir: /opt/app/.venv
+    app_user: ubuntu
+    app_port: 8000
+
+  tasks:
+    #  System packages 
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install system packages
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - nginx
+          - git
+          - curl
+        state: present
+
+    #  App directory & source 
+
+    - name: Create app directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Synchronise app source - app package
+      ansible.builtin.copy:
+        src: app/
+        dest: "{{ app_dir }}/app/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    - name: Synchronise app source - main.py
+      ansible.builtin.copy:
+        src: main.py
+        dest: "{{ app_dir }}/main.py"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    - name: Synchronise app source - requirements.txt
+      ansible.builtin.copy:
+        src: requirements.txt
+        dest: "{{ app_dir }}/requirements.txt"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    - name: Check if public/ directory exists locally
+      ansible.builtin.stat:
+        path: public/
+      register: public_dir
+      delegate_to: localhost
+      become: false
+
+    - name: Synchronise app source - public/ static assets (if present)
+      ansible.builtin.copy:
+        src: public/
+        dest: "{{ app_dir }}/public/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+      when: public_dir.stat.exists
+
+    #  Python virtual environment 
+
+    - name: Create Python virtual environment
+      ansible.builtin.command:
+        cmd: python3 -m venv "{{ venv_dir }}"
+        creates: "{{ venv_dir }}/bin/activate"
+      become_user: "{{ app_user }}"
+
+    - name: Upgrade pip in venv
+      ansible.builtin.pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ venv_dir }}"
+
+    - name: Install app dependencies
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+
+    - name: Install gunicorn and uvicorn in venv
+      ansible.builtin.pip:
+        name:
+          - gunicorn
+          - uvicorn[standard]
+        virtualenv: "{{ venv_dir }}"
+
+    #  Systemd service 
+
+    - name: Write systemd service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/python-app.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Python FastAPI App (gunicorn)
+          After=network.target
+
+          [Service]
+          Type=exec
+          User={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          Environment="PORT={{ app_port }}"
+          ExecStart={{ venv_dir }}/bin/gunicorn app.main:app \
+              -k uvicorn.workers.UvicornWorker \
+              -w 4 \
+              -b 0.0.0.0:{{ app_port }}
+          Restart=on-failure
+          RestartSec=5
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start python-app service
+      ansible.builtin.systemd:
+        name: python-app
+        enabled: true
+        state: restarted
+
+    #  Nginx reverse proxy 
+
+    - name: Write Nginx site config
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/app
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              server_name _;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:{{ app_port }};
+                  proxy_set_header   Host $host;
+                  proxy_set_header   X-Real-IP $remote_addr;
+                  proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 60s;
+              }
+          }
+
+    - name: Enable Nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-enabled/app
+        state: link
+
+    - name: Remove default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Enable and restart Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: restarted
+
+    #  Smoke-test on the instance 
+
+    - name: Wait for app to respond locally
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: health_result
+      retries: 12
+      delay: 10
+      until: health_result.status == 200
