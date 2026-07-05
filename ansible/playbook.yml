@@ -68,6 +68,7 @@
         path: "{{ playbook_dir }}/../public/"
       register: public_dir
       delegate_to: localhost
+      connection: local
       become: false
 
     - name: Synchronise app source - public/ static assets (if present)
